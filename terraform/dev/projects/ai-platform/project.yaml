@@ -10,15 +10,15 @@ metric_namespaces:
   - AWS/DynamoDB
   - AWS/AOSS
 
-metric_catalogue_url: https://raw.githubusercontent.com/normjon/ai-platform-demo/obs/register-ai-platform-catalogue/specs/observability-metric-catalogue.md
+metric_catalogue_url: https://raw.githubusercontent.com/normjon/ai-platform-demo/main/specs/observability-metric-catalogue.md
 
 dashboards:
   - name: agent-operational-health
-    source_url: https://raw.githubusercontent.com/normjon/ai-platform-demo/obs/register-ai-platform-catalogue/specs/dashboards/agent-operational-health.json
+    source_url: https://raw.githubusercontent.com/normjon/ai-platform-demo/main/specs/dashboards/agent-operational-health.json
   - name: quality-trending
-    source_url: https://raw.githubusercontent.com/normjon/ai-platform-demo/obs/register-ai-platform-catalogue/specs/dashboards/quality-trending.json
+    source_url: https://raw.githubusercontent.com/normjon/ai-platform-demo/main/specs/dashboards/quality-trending.json
   - name: cost-token-consumption
-    source_url: https://raw.githubusercontent.com/normjon/ai-platform-demo/obs/register-ai-platform-catalogue/specs/dashboards/cost-token-consumption.json
+    source_url: https://raw.githubusercontent.com/normjon/ai-platform-demo/main/specs/dashboards/cost-token-consumption.json
 
 alerts:
   - metric_namespace: AIPlatform/Quality

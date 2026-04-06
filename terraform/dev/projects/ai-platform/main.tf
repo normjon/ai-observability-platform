@@ -52,24 +52,21 @@ data "terraform_remote_state" "platform" {
 }
 
 # ── Dashboard definitions ─────────────────────────────────────────────────────
-# Source URLs reference the committed files in the project repository.
-# These URLs must be publicly reachable at plan time — the http data source
-# in the project-observer module fetches them during terraform plan.
-# After the Phase 2 PR is merged to main, update these to the main-branch URLs.
+# Source URLs point to the main branch — Phase 2 PR (ai-platform-demo#19) merged.
 
 locals {
   dashboard_definitions = [
     {
       name       = "agent-operational-health"
-      source_url = "https://raw.githubusercontent.com/normjon/ai-platform-demo/obs/register-ai-platform-catalogue/specs/dashboards/agent-operational-health.json"
+      source_url = "https://raw.githubusercontent.com/normjon/ai-platform-demo/main/specs/dashboards/agent-operational-health.json"
     },
     {
       name       = "quality-trending"
-      source_url = "https://raw.githubusercontent.com/normjon/ai-platform-demo/obs/register-ai-platform-catalogue/specs/dashboards/quality-trending.json"
+      source_url = "https://raw.githubusercontent.com/normjon/ai-platform-demo/main/specs/dashboards/quality-trending.json"
     },
     {
       name       = "cost-token-consumption"
-      source_url = "https://raw.githubusercontent.com/normjon/ai-platform-demo/obs/register-ai-platform-catalogue/specs/dashboards/cost-token-consumption.json"
+      source_url = "https://raw.githubusercontent.com/normjon/ai-platform-demo/main/specs/dashboards/cost-token-consumption.json"
     }
   ]
 
