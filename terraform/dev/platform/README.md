@@ -1,0 +1,105 @@
+# Platform Layer — README
+
+Provisions the observability platform: AMP workspace, AMG workspace, Kinesis
+Firehose delivery stream, CloudWatch metric stream, IAM roles, and the Lambda
+that writes metrics to AMP.
+
+---
+
+## Metric flow
+
+```
+CloudWatch metric stream (JSON)
+        │
+        ▼  PutRecord
+Kinesis Firehose (extended_s3)
+        │
+        ▼  Lambda transformation (synchronous)
+ai-observability-amp-writer Lambda
+        │  - base64 decode + gzip decompress records
+        │  - parse CloudWatch JSON
+        │  - encode Prometheus remote write protobuf
+        │  - snappy compress (cramjam)
+        │  - SigV4 sign with botocore
+        │  POST → AMP remote_write
+        │
+        ▼  S3 archive (raw CloudWatch JSON)
+ai-observability-firehose-buffer S3 bucket
+```
+
+---
+
+## Architecture decision: Firehose `extended_s3` + Lambda, not `http_endpoint`
+
+**Do not use `http_endpoint` destination to write directly to AMP.**
+
+Kinesis Firehose `http_endpoint` destinations do NOT support SigV4 request
+signing. The `role_arn` field in `http_endpoint_configuration` controls S3
+backup permissions only — it is not used to sign HTTP requests to the
+endpoint. AMP requires SigV4-signed requests with the `aps` service name.
+Firehose will always receive a 403 from AMP with `http_endpoint`.
+
+The correct architecture (per AWS documentation) is:
+- Firehose `extended_s3` destination
+- Lambda transformation processor attached to the delivery stream
+- Lambda performs the CloudWatch JSON → Prometheus protobuf conversion,
+  snappy compression, SigV4 signing, and HTTP POST to AMP
+- Firehose archives the raw CloudWatch JSON to S3 as a replay buffer
+
+Reference: https://github.com/aws-observability/observability-best-practices/
+tree/main/sandbox/CWMetricStreamExporter
+
+---
+
+## CloudWatch metric stream output format
+
+The metric stream uses `output_format = "json"` (newline-delimited CloudWatch
+JSON records). The Lambda parser is written for this format.
+
+Do NOT switch to `opentelemetry1.0` — that format produces binary OTLP
+protobuf which the Lambda cannot parse as text. The project-observer module
+also uses `output_format = "json"` for its per-project streams.
+
+---
+
+## Lambda (`lambda/`)
+
+`handler.py` — hand-coded Prometheus remote write protobuf encoder, no
+external protobuf library. Uses cramjam for snappy compression and botocore
+for SigV4 signing.
+
+`requirements.txt` — `cramjam==2.9.1` only. All other dependencies
+(boto3, botocore) are included in the Lambda runtime.
+
+The Lambda build is managed by a `null_resource` in `main.tf` that runs pip
+with `--platform manylinux2014_x86_64` to produce Linux-compatible wheels on
+macOS. The build hash triggers on changes to `handler.py` or
+`requirements.txt`.
+
+---
+
+## IAM
+
+Three service roles are defined here (not in foundation) so their policies
+can reference exact same-layer resource ARNs — no wildcards required.
+See CLAUDE.md IAM Requirements section for full rationale.
+
+The Lambda execution role (`ai-observability-lambda-amp-writer-dev`) requires
+`kms:GenerateDataKey` and `kms:Decrypt` on the foundation KMS key because the
+AMP workspace is encrypted with a customer-managed key. `aps:RemoteWrite`
+alone is not sufficient — AMP enforces KMS authorization for all writes to
+CMK-encrypted workspaces.
+
+---
+
+## Apply
+
+```bash
+cd terraform/dev/platform
+terraform init
+terraform plan -var-file=terraform.tfvars -out=tfplan
+terraform apply tfplan
+```
+
+`terraform.tfvars` is git-ignored. Copy `terraform.tfvars.example` and set
+`account_id` to the sandbox account ID.

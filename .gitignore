@@ -7,3 +7,7 @@
 **/override.tf
 **/.terraform.lock.hcl
 **/tfplan
+
+# Lambda build artifacts — never committed
+**/lambda/package/
+**/lambda/*.zip

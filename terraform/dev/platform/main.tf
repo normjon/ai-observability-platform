@@ -5,6 +5,14 @@ terraform {
       source  = "hashicorp/aws"
       version = "~> 5.0"
     }
+    archive = {
+      source  = "hashicorp/archive"
+      version = ">= 2.0"
+    }
+    null = {
+      source  = "hashicorp/null"
+      version = ">= 3.0"
+    }
   }
 }
 
@@ -38,8 +46,6 @@ data "terraform_remote_state" "foundation" {
 
 # ── Component 1: AMP Workspace ────────────────────────────────────────────────
 # Single AMP workspace per environment. Encrypted with the foundation KMS key.
-# Endpoint output is consumed by the Firehose delivery stream (Component 3)
-# and by the project-observer module for each registered project.
 
 resource "aws_prometheus_workspace" "this" {
   alias       = "ai-observability-${var.environment}"
@@ -139,13 +145,145 @@ resource "aws_grafana_workspace" "this" {
   })
 }
 
-# ── Component 3: Kinesis Firehose + firehose_delivery IAM role ───────────────
-# Delivers CloudWatch metric stream records to AMP via remote_write.
-# S3 backup captures only FailedDataOnly — successful records are not
-# duplicated to S3. S3 backup is encrypted with the foundation KMS key.
+# ── Component 3: AMP writer Lambda ───────────────────────────────────────────
 #
-# URL: AMP prometheus_endpoint already ends with "/"; appending
-# "api/v1/remote_write" produces the correct remote write path.
+# Firehose http_endpoint destination does NOT sign HTTP requests with SigV4 —
+# the role_arn in http_endpoint_configuration only governs S3 backup writes,
+# not the HTTP calls to the endpoint. AMP requires SigV4 on every request.
+#
+# Architecture: CloudWatch metric stream → Firehose (extended_s3 destination)
+#   → Lambda transformation → AMP remote_write (SigV4-signed by Lambda)
+#
+# Firehose calls this Lambda synchronously as a data processor. The Lambda
+# converts CloudWatch JSON records to Prometheus remote write format
+# (protobuf + snappy), signs with SigV4 using its execution role, and POSTs
+# to AMP. It returns all records as Ok so Firehose archives them to S3.
+#
+# Source: lambda/handler.py
+# See README.md — Known limitations — for the full diagnostic narrative.
+
+resource "null_resource" "lambda_build" {
+  triggers = {
+    handler_hash      = filemd5("${path.module}/lambda/handler.py")
+    requirements_hash = filemd5("${path.module}/lambda/requirements.txt")
+  }
+
+  provisioner "local-exec" {
+    command = <<-EOT
+      set -e
+      rm -rf "${path.module}/lambda/package"
+      mkdir -p "${path.module}/lambda/package"
+      python3 -m pip install \
+        --quiet \
+        --target "${path.module}/lambda/package" \
+        --platform manylinux2014_x86_64 \
+        --only-binary=:all: \
+        --python-version 3.12 \
+        --implementation cp \
+        -r "${path.module}/lambda/requirements.txt"
+      cp "${path.module}/lambda/handler.py" "${path.module}/lambda/package/"
+    EOT
+  }
+}
+
+data "archive_file" "lambda_amp_writer" {
+  type        = "zip"
+  source_dir  = "${path.module}/lambda/package"
+  output_path = "${path.module}/lambda/amp_writer.zip"
+  depends_on  = [null_resource.lambda_build]
+}
+
+resource "aws_iam_role" "lambda_amp_writer" {
+  name = "ai-observability-lambda-amp-writer-${var.environment}"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect    = "Allow"
+      Principal = { Service = "lambda.amazonaws.com" }
+      Action    = "sts:AssumeRole"
+    }]
+  })
+
+  tags = local.tags
+}
+
+resource "aws_iam_role_policy" "lambda_amp_writer" {
+  name = "amp-write-logs"
+  role = aws_iam_role.lambda_amp_writer.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid      = "AMPRemoteWrite"
+        Effect   = "Allow"
+        Action   = ["aps:RemoteWrite"]
+        Resource = aws_prometheus_workspace.this.arn
+      },
+      {
+        Sid    = "KMSForAMP"
+        Effect = "Allow"
+        Action = ["kms:GenerateDataKey", "kms:Decrypt"]
+        Resource = data.terraform_remote_state.foundation.outputs.kms_key_arn
+      },
+      {
+        Sid    = "CloudWatchLogs"
+        Effect = "Allow"
+        Action = [
+          "logs:CreateLogGroup",
+          "logs:CreateLogStream",
+          "logs:PutLogEvents"
+        ]
+        Resource = "arn:aws:logs:${var.aws_region}:${var.account_id}:log-group:/aws/lambda/ai-observability-amp-writer-${var.environment}:*"
+      }
+    ]
+  })
+}
+
+resource "aws_lambda_function" "amp_writer" {
+  filename         = data.archive_file.lambda_amp_writer.output_path
+  source_code_hash = data.archive_file.lambda_amp_writer.output_base64sha256
+  function_name    = "ai-observability-amp-writer-${var.environment}"
+  role             = aws_iam_role.lambda_amp_writer.arn
+  handler          = "handler.handler"
+  runtime          = "python3.12"
+  timeout          = 300
+  memory_size      = 256
+
+  environment {
+    variables = {
+      AMP_REMOTE_WRITE_URL = "${aws_prometheus_workspace.this.prometheus_endpoint}api/v1/remote_write"
+      AMP_REGION           = var.aws_region
+    }
+  }
+
+  tags = merge(local.tags, {
+    Name      = "ai-observability-amp-writer-${var.environment}"
+    Component = "amp-writer"
+  })
+
+  depends_on = [data.archive_file.lambda_amp_writer]
+}
+
+# Break the Firehose ↔ Lambda permission circular dependency by computing
+# the Firehose ARN from its known name rather than referencing the resource.
+resource "aws_lambda_permission" "firehose_invoke" {
+  statement_id  = "AllowFirehoseInvoke"
+  action        = "lambda:InvokeFunction"
+  function_name = aws_lambda_function.amp_writer.function_name
+  principal     = "firehose.amazonaws.com"
+  source_arn    = "arn:aws:firehose:${var.aws_region}:${var.account_id}:deliverystream/ai-observability-amp-delivery-${var.environment}"
+}
+
+# ── Component 4: Kinesis Firehose + firehose_delivery IAM role ───────────────
+#
+# Destination: extended_s3. Firehose writes every record to S3 after invoking
+# the Lambda transformation. S3 is the archive; AMP ingestion is via Lambda.
+#
+# The Firehose delivery role no longer needs aps:RemoteWrite — the Lambda
+# execution role (aws_iam_role.lambda_amp_writer) holds that permission.
+# The delivery role needs lambda:InvokeFunction to call the transformation.
 
 resource "aws_iam_role" "firehose_delivery" {
   name = "ai-observability-firehose-delivery-${var.environment}"
@@ -160,6 +298,9 @@ resource "aws_iam_role" "firehose_delivery" {
         StringEquals = {
           "aws:SourceAccount" = var.account_id
         }
+        ArnLike = {
+          "aws:SourceArn" = "arn:aws:firehose:${var.aws_region}:${var.account_id}:deliverystream/ai-observability-amp-delivery-${var.environment}"
+        }
       }
     }]
   })
@@ -168,17 +309,18 @@ resource "aws_iam_role" "firehose_delivery" {
 }
 
 resource "aws_iam_role_policy" "firehose_delivery" {
-  name = "amp-s3-kms-delivery"
+  name = "s3-kms-lambda-delivery"
   role = aws_iam_role.firehose_delivery.id
 
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [
       {
-        Sid      = "AMPRemoteWrite"
-        Effect   = "Allow"
-        Action   = ["aps:RemoteWrite"]
-        Resource = aws_prometheus_workspace.this.arn
+        Sid    = "LambdaInvoke"
+        Effect = "Allow"
+        Action = ["lambda:InvokeFunction"]
+        # Lambda ARN with :* to cover all versions and $LATEST.
+        Resource = "${aws_lambda_function.amp_writer.arn}:*"
       },
       {
         Sid    = "FirehoseBufferS3"
@@ -201,28 +343,29 @@ resource "aws_iam_role_policy" "firehose_delivery" {
 
 resource "aws_kinesis_firehose_delivery_stream" "this" {
   name        = "ai-observability-amp-delivery-${var.environment}"
-  destination = "http_endpoint"
+  destination = "extended_s3"
 
-  http_endpoint_configuration {
-    url                = "${aws_prometheus_workspace.this.prometheus_endpoint}api/v1/remote_write"
-    name               = "AMP Remote Write"
+  extended_s3_configuration {
     role_arn           = aws_iam_role.firehose_delivery.arn
+    bucket_arn         = data.terraform_remote_state.foundation.outputs.firehose_buffer_bucket_arn
+    prefix             = "metrics/year=!{timestamp:yyyy}/month=!{timestamp:MM}/day=!{timestamp:dd}/"
+    error_output_prefix = "errors/!{firehose:error-output-type}/year=!{timestamp:yyyy}/month=!{timestamp:MM}/day=!{timestamp:dd}/"
     buffering_size     = 5
     buffering_interval = 60
-    retry_duration     = 30
-    s3_backup_mode     = "FailedDataOnly"
+    compression_format = "GZIP"
+    kms_key_arn        = data.terraform_remote_state.foundation.outputs.kms_key_arn
 
-    request_configuration {
-      content_encoding = "GZIP"
-    }
+    processing_configuration {
+      enabled = true
 
-    s3_configuration {
-      role_arn           = aws_iam_role.firehose_delivery.arn
-      bucket_arn         = data.terraform_remote_state.foundation.outputs.firehose_buffer_bucket_arn
-      buffering_size     = 5
-      buffering_interval = 300
-      compression_format = "GZIP"
-      kms_key_arn        = data.terraform_remote_state.foundation.outputs.kms_key_arn
+      processors {
+        type = "Lambda"
+
+        parameters {
+          parameter_name  = "LambdaArn"
+          parameter_value = "${aws_lambda_function.amp_writer.arn}:$LATEST"
+        }
+      }
     }
   }
 
@@ -232,13 +375,14 @@ resource "aws_kinesis_firehose_delivery_stream" "this" {
   })
 }
 
-# ── Component 4: CloudWatch Metric Stream + cw_stream IAM role ───────────────
-# Account-level metric stream in opentelemetry1.0 format — the only format
-# AMP's remote write endpoint accepts from Firehose.
+# ── Component 5: CloudWatch Metric Stream + cw_stream IAM role ───────────────
+# Account-level metric stream in json format.
+# json format outputs newline-delimited CloudWatch JSON that the Lambda can
+# parse directly without protobuf decoding.
 #
-# Initial namespace filter: five AWS-native namespaces. Project-specific
-# namespaces (e.g. AIPlatform/Quality) are added by the project-observer
-# module when a project registers. Do not hardcode project namespaces here.
+# Note: output_format changed from opentelemetry1.0 to json to match the
+# Lambda handler's CloudWatch JSON parser. Per-project streams in the
+# project-observer module use the same format.
 
 resource "aws_iam_role" "cw_stream" {
   name = "ai-observability-cw-stream-${var.environment}"
@@ -282,7 +426,7 @@ resource "aws_cloudwatch_metric_stream" "this" {
   name          = "ai-observability-metric-stream-${var.environment}"
   role_arn      = aws_iam_role.cw_stream.arn
   firehose_arn  = aws_kinesis_firehose_delivery_stream.this.arn
-  output_format = "opentelemetry1.0"
+  output_format = "json"
 
   # AWS-native namespaces streamed at platform level.
   # Project namespaces added per-project by project-observer module.
@@ -298,17 +442,17 @@ resource "aws_cloudwatch_metric_stream" "this" {
   })
 }
 
-# ── Component 5: Platform infrastructure alarms ───────────────────────────────
+# ── Component 6: Platform infrastructure alarms ───────────────────────────────
 # Self-monitoring alarms on the observability platform itself.
 # treat_missing_data = "notBreaching" prevents false alarms during periods
 # with no stream activity (e.g. before the first project registers).
 
-resource "aws_cloudwatch_metric_alarm" "firehose_delivery_errors" {
-  alarm_name          = "ai-observability-firehose-delivery-errors-${var.environment}"
-  alarm_description   = "Firehose delivery to AMP success rate below 100%"
+resource "aws_cloudwatch_metric_alarm" "firehose_s3_delivery_errors" {
+  alarm_name          = "ai-observability-firehose-s3-errors-${var.environment}"
+  alarm_description   = "Firehose S3 delivery success rate below 100%"
   comparison_operator = "LessThanThreshold"
   evaluation_periods  = 1
-  metric_name         = "DeliveryToAmazonPrometheus.Success"
+  metric_name         = "DeliveryToS3.Success"
   namespace           = "AWS/Firehose"
   period              = 300
   statistic           = "Average"
@@ -317,6 +461,25 @@ resource "aws_cloudwatch_metric_alarm" "firehose_delivery_errors" {
 
   dimensions = {
     DeliveryStreamName = aws_kinesis_firehose_delivery_stream.this.name
+  }
+
+  tags = local.tags
+}
+
+resource "aws_cloudwatch_metric_alarm" "lambda_amp_writer_errors" {
+  alarm_name          = "ai-observability-amp-writer-errors-${var.environment}"
+  alarm_description   = "AMP writer Lambda encountered invocation errors"
+  comparison_operator = "GreaterThanOrEqualToThreshold"
+  evaluation_periods  = 1
+  metric_name         = "Errors"
+  namespace           = "AWS/Lambda"
+  period              = 300
+  statistic           = "Sum"
+  threshold           = 1
+  treat_missing_data  = "notBreaching"
+
+  dimensions = {
+    FunctionName = aws_lambda_function.amp_writer.function_name
   }
 
   tags = local.tags
