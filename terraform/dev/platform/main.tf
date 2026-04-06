@@ -162,14 +162,15 @@ resource "aws_grafana_workspace" "this" {
 # The Grafana provider uses an API key (var.grafana_auth) created out-of-band.
 
 resource "grafana_data_source" "amp" {
-  type = "grafana-amazonprometheus-datasource"
+  type = "prometheus"
   name = "Amazon Managed Prometheus — ${var.environment}"
   uid  = "amp-${var.environment}"
   url  = aws_prometheus_workspace.this.prometheus_endpoint
 
   json_data_encoded = jsonencode({
-    authType      = "default"
-    defaultRegion = var.aws_region
+    sigV4Auth     = true
+    sigV4AuthType = "default"
+    sigV4Region   = var.aws_region
     httpMethod    = "POST"
     timeInterval  = "60s"
   })
