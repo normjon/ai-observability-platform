@@ -50,3 +50,20 @@ output "firehose_delivery_role_arn" {
   description = "ARN of the Firehose delivery IAM role"
   value       = aws_iam_role.firehose_delivery.arn
 }
+
+# ── CloudWatch metric stream ───────────────────────────────────────────────────
+
+output "metric_stream_name" {
+  description = "Name of the CloudWatch metric stream"
+  value       = aws_cloudwatch_metric_stream.this.name
+}
+
+output "metric_stream_arn" {
+  description = "ARN of the CloudWatch metric stream"
+  value       = aws_cloudwatch_metric_stream.this.arn
+}
+
+output "cw_stream_role_arn" {
+  description = "ARN of the CloudWatch metric stream delivery IAM role"
+  value       = aws_iam_role.cw_stream.arn
+}

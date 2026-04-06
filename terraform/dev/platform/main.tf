@@ -231,3 +231,69 @@ resource "aws_kinesis_firehose_delivery_stream" "this" {
     Component = "firehose"
   })
 }
+
+# ── Component 4: CloudWatch Metric Stream + cw_stream IAM role ───────────────
+# Account-level metric stream in opentelemetry1.0 format — the only format
+# AMP's remote write endpoint accepts from Firehose.
+#
+# Initial namespace filter: five AWS-native namespaces. Project-specific
+# namespaces (e.g. AIPlatform/Quality) are added by the project-observer
+# module when a project registers. Do not hardcode project namespaces here.
+
+resource "aws_iam_role" "cw_stream" {
+  name = "ai-observability-cw-stream-${var.environment}"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect    = "Allow"
+      Principal = { Service = "streams.metrics.cloudwatch.amazonaws.com" }
+      Action    = "sts:AssumeRole"
+      Condition = {
+        StringEquals = {
+          "aws:SourceAccount" = var.account_id
+        }
+      }
+    }]
+  })
+
+  tags = local.tags
+}
+
+resource "aws_iam_role_policy" "cw_stream" {
+  name = "firehose-put-record"
+  role = aws_iam_role.cw_stream.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Sid    = "FirehosePutRecord"
+      Effect = "Allow"
+      Action = [
+        "firehose:PutRecord",
+        "firehose:PutRecordBatch"
+      ]
+      Resource = aws_kinesis_firehose_delivery_stream.this.arn
+    }]
+  })
+}
+
+resource "aws_cloudwatch_metric_stream" "this" {
+  name          = "ai-observability-metric-stream-${var.environment}"
+  role_arn      = aws_iam_role.cw_stream.arn
+  firehose_arn  = aws_kinesis_firehose_delivery_stream.this.arn
+  output_format = "opentelemetry1.0"
+
+  # AWS-native namespaces streamed at platform level.
+  # Project namespaces added per-project by project-observer module.
+  include_filter { namespace = "AWS/Lambda" }
+  include_filter { namespace = "AWS/DynamoDB" }
+  include_filter { namespace = "AWS/Bedrock" }
+  include_filter { namespace = "AWS/AOSS" }
+  include_filter { namespace = "AWS/States" }
+
+  tags = merge(local.tags, {
+    Name      = "ai-observability-metric-stream-${var.environment}"
+    Component = "metric-stream"
+  })
+}
