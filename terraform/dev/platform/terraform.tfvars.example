@@ -1,3 +1,4 @@
-aws_region  = "us-east-2"
-environment = "dev"
-account_id  = "<your-account-id>"
+aws_region   = "us-east-2"
+environment  = "dev"
+account_id   = "<your-account-id>"
+grafana_auth = "<grafana-api-key>"  # Create in AMG workspace → Administration → API keys

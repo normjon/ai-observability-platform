@@ -34,6 +34,11 @@ output "amg_datasource_role_arn" {
   value       = aws_iam_role.amg_datasource.arn
 }
 
+output "amp_grafana_datasource_uid" {
+  description = "UID of the AMP Prometheus data source in AMG — reference in dashboard JSON panel datasource fields"
+  value       = grafana_data_source.amp.uid
+}
+
 # ── Firehose ──────────────────────────────────────────────────────────────────
 
 output "firehose_stream_name" {

@@ -13,11 +13,20 @@ terraform {
       source  = "hashicorp/null"
       version = ">= 3.0"
     }
+    grafana = {
+      source  = "grafana/grafana"
+      version = ">= 2.0"
+    }
   }
 }
 
 provider "aws" {
   region = var.aws_region
+}
+
+provider "grafana" {
+  url  = "https://${aws_grafana_workspace.this.endpoint}"
+  auth = var.grafana_auth
 }
 
 locals {
@@ -142,6 +151,28 @@ resource "aws_grafana_workspace" "this" {
   tags = merge(local.tags, {
     Name      = "ai-observability-amg-${var.environment}"
     Component = "amg"
+  })
+}
+
+# ── AMG data source: AMP ──────────────────────────────────────────────────────
+# Configures the Prometheus data source in AMG pointing to the AMP workspace.
+# Uses SigV4 auth via the workspace IAM role (amg_datasource).
+# UID is deterministic: amp-<environment> so dashboards can reference it
+# without dynamic lookup.
+# The Grafana provider uses an API key (var.grafana_auth) created out-of-band.
+
+resource "grafana_data_source" "amp" {
+  type = "prometheus"
+  name = "Amazon Managed Prometheus — ${var.environment}"
+  uid  = "amp-${var.environment}"
+  url  = aws_prometheus_workspace.this.prometheus_endpoint
+
+  json_data_encoded = jsonencode({
+    sigV4Auth        = true
+    sigV4AuthType    = "workspace_iam_role"
+    sigV4Region      = var.aws_region
+    httpMethod       = "POST"
+    timeInterval     = "60s"
   })
 }
 
