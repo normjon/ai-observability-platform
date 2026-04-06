@@ -297,3 +297,46 @@ resource "aws_cloudwatch_metric_stream" "this" {
     Component = "metric-stream"
   })
 }
+
+# ── Component 5: Platform infrastructure alarms ───────────────────────────────
+# Self-monitoring alarms on the observability platform itself.
+# treat_missing_data = "notBreaching" prevents false alarms during periods
+# with no stream activity (e.g. before the first project registers).
+
+resource "aws_cloudwatch_metric_alarm" "firehose_delivery_errors" {
+  alarm_name          = "ai-observability-firehose-delivery-errors-${var.environment}"
+  alarm_description   = "Firehose delivery to AMP success rate below 100%"
+  comparison_operator = "LessThanThreshold"
+  evaluation_periods  = 1
+  metric_name         = "DeliveryToAmazonPrometheus.Success"
+  namespace           = "AWS/Firehose"
+  period              = 300
+  statistic           = "Average"
+  threshold           = 1
+  treat_missing_data  = "notBreaching"
+
+  dimensions = {
+    DeliveryStreamName = aws_kinesis_firehose_delivery_stream.this.name
+  }
+
+  tags = local.tags
+}
+
+resource "aws_cloudwatch_metric_alarm" "metric_stream_errors" {
+  alarm_name          = "ai-observability-metric-stream-errors-${var.environment}"
+  alarm_description   = "CloudWatch metric stream encountered delivery errors"
+  comparison_operator = "GreaterThanOrEqualToThreshold"
+  evaluation_periods  = 1
+  metric_name         = "MetricStreamErrors"
+  namespace           = "AWS/CloudWatch/MetricStream"
+  period              = 300
+  statistic           = "Sum"
+  threshold           = 1
+  treat_missing_data  = "notBreaching"
+
+  dimensions = {
+    MetricStreamName = aws_cloudwatch_metric_stream.this.name
+  }
+
+  tags = local.tags
+}
