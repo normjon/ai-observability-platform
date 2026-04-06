@@ -30,17 +30,3 @@ output "firehose_buffer_bucket_id" {
   value       = aws_s3_bucket.firehose_buffer.id
 }
 
-output "iam_role_cw_stream_arn" {
-  description = "ARN of the CloudWatch metric stream delivery IAM role"
-  value       = aws_iam_role.cw_stream.arn
-}
-
-output "iam_role_firehose_delivery_arn" {
-  description = "ARN of the Kinesis Firehose delivery IAM role"
-  value       = aws_iam_role.firehose_delivery.arn
-}
-
-output "iam_role_amg_datasource_arn" {
-  description = "ARN of the AMG data source IAM role"
-  value       = aws_iam_role.amg_datasource.arn
-}
