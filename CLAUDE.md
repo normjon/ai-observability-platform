@@ -560,33 +560,55 @@ Location: modules/project-observer/
 
 ### Inputs
 
-| Variable              | Type         | Description                        |
-|-----------------------|--------------|------------------------------------|
-| project_id            | string       | Unique project identifier          |
-| display_name          | string       | Grafana folder name                |
-| metric_namespaces     | list(string) | Namespaces to add to stream filter |
-| dashboard_definitions | list(object) | name + JSON content per dashboard  |
-| alert_definitions     | list(object) | Alert specs from project.yaml      |
-| amp_workspace_id      | string       | From platform remote state         |
-| amg_workspace_id      | string       | From platform remote state         |
-| firehose_stream_name  | string       | From platform remote state         |
-| kms_key_arn           | string       | From platform remote state         |
-| environment           | string       | dev / staging / production         |
-| tags                  | map(string)  | Standard tags                      |
+| Variable              | Type         | Description                          |
+|-----------------------|--------------|--------------------------------------|
+| project_id            | string       | Unique project identifier            |
+| display_name          | string       | Grafana folder name                  |
+| owner                 | string       | Team name                            |
+| metric_namespaces     | list(string) | Namespaces to register               |
+| dashboard_definitions | list(object) | name + source_url per dashboard      |
+| alert_definitions     | list(object) | Alert specs from project.yaml        |
+| amg_workspace_id      | string       | From platform remote state           |
+| grafana_url           | string       | AMG workspace HTTPS endpoint         |
+| firehose_stream_arn   | string       | From platform remote state           |
+| account_id            | string       | AWS account ID                       |
+| environment           | string       | dev / staging / production           |
+| tags                  | map(string)  | Standard tags                        |
+
+Note: amp_workspace_id and kms_key_arn are NOT module inputs. The module
+does not configure AMP directly — metrics flow through the platform
+Firehose. The workflow spec example that lists kms_key_arn is incorrect.
 
 ### What it provisions
-- aws_grafana_folder — project folder in AMG
-- aws_grafana_dashboard — one per dashboard in project.yaml,
-  JSON fetched from source_url via Terraform http data source
-- CloudWatch metric stream namespace filter addition
+- grafana_folder — project folder in AMG (uid = project_id)
+- grafana_dashboard — one per dashboard in project.yaml,
+  JSON fetched from source_url at plan time via http data source
+- aws_iam_role + aws_cloudwatch_metric_stream — per-project metric
+  stream for custom namespaces only (see Namespace Filter below)
 - aws_cloudwatch_metric_alarm — one per alert definition
-- CloudWatch data source log group references (alarms only)
+
+### Namespace filter approach (Option A)
+
+The platform-level CloudWatch metric stream covers AWS/* namespaces.
+Custom project namespaces (e.g. AIPlatform/Quality) require a separate
+per-project metric stream targeting the same platform Firehose ARN.
+
+Decision: Option A — per-project stream for custom namespaces.
+Rationale: Avoids cross-state dependency. The platform stream state
+cannot be modified by a project-layer apply without sharing state,
+which violates ADR-017. Each project stream is independently
+destroyable without affecting other projects.
+
+The module creates the per-project stream only when
+`local.custom_namespaces` (namespaces not starting with "AWS/")
+is non-empty. Projects that register only AWS/* namespaces get no
+additional metric stream.
 
 ### Dashboard JSON fetching
-Dashboard JSON is fetched from source_url at plan time using
-the Terraform http data source. If a source_url is unreachable
-at plan time the plan fails. This is intentional — broken URLs
-are caught before apply, not after.
+Dashboard JSON is fetched from source_url at plan time using the
+Terraform http data source. If a source_url is unreachable at plan
+time the plan fails. This is intentional — broken URLs are caught
+before apply, not after.
 
 ---
 
