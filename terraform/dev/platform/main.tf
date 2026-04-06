@@ -138,3 +138,96 @@ resource "aws_grafana_workspace" "this" {
     Component = "amg"
   })
 }
+
+# ── Component 3: Kinesis Firehose + firehose_delivery IAM role ───────────────
+# Delivers CloudWatch metric stream records to AMP via remote_write.
+# S3 backup captures only FailedDataOnly — successful records are not
+# duplicated to S3. S3 backup is encrypted with the foundation KMS key.
+#
+# URL: AMP prometheus_endpoint already ends with "/"; appending
+# "api/v1/remote_write" produces the correct remote write path.
+
+resource "aws_iam_role" "firehose_delivery" {
+  name = "ai-observability-firehose-delivery-${var.environment}"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect    = "Allow"
+      Principal = { Service = "firehose.amazonaws.com" }
+      Action    = "sts:AssumeRole"
+      Condition = {
+        StringEquals = {
+          "aws:SourceAccount" = var.account_id
+        }
+      }
+    }]
+  })
+
+  tags = local.tags
+}
+
+resource "aws_iam_role_policy" "firehose_delivery" {
+  name = "amp-s3-kms-delivery"
+  role = aws_iam_role.firehose_delivery.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid      = "AMPRemoteWrite"
+        Effect   = "Allow"
+        Action   = ["aps:RemoteWrite"]
+        Resource = aws_prometheus_workspace.this.arn
+      },
+      {
+        Sid    = "FirehoseBufferS3"
+        Effect = "Allow"
+        Action = ["s3:PutObject"]
+        Resource = "${data.terraform_remote_state.foundation.outputs.firehose_buffer_bucket_arn}/*"
+      },
+      {
+        Sid    = "KMSEncryption"
+        Effect = "Allow"
+        Action = [
+          "kms:GenerateDataKey",
+          "kms:Decrypt"
+        ]
+        Resource = data.terraform_remote_state.foundation.outputs.kms_key_arn
+      }
+    ]
+  })
+}
+
+resource "aws_kinesis_firehose_delivery_stream" "this" {
+  name        = "ai-observability-amp-delivery-${var.environment}"
+  destination = "http_endpoint"
+
+  http_endpoint_configuration {
+    url                = "${aws_prometheus_workspace.this.prometheus_endpoint}api/v1/remote_write"
+    name               = "AMP Remote Write"
+    role_arn           = aws_iam_role.firehose_delivery.arn
+    buffering_size     = 5
+    buffering_interval = 60
+    retry_duration     = 30
+    s3_backup_mode     = "FailedDataOnly"
+
+    request_configuration {
+      content_encoding = "GZIP"
+    }
+
+    s3_configuration {
+      role_arn           = aws_iam_role.firehose_delivery.arn
+      bucket_arn         = data.terraform_remote_state.foundation.outputs.firehose_buffer_bucket_arn
+      buffering_size     = 5
+      buffering_interval = 300
+      compression_format = "GZIP"
+      kms_key_arn        = data.terraform_remote_state.foundation.outputs.kms_key_arn
+    }
+  }
+
+  tags = merge(local.tags, {
+    Name      = "ai-observability-amp-delivery-${var.environment}"
+    Component = "firehose"
+  })
+}

@@ -33,3 +33,20 @@ output "amg_datasource_role_arn" {
   description = "ARN of the AMG datasource IAM role"
   value       = aws_iam_role.amg_datasource.arn
 }
+
+# ── Firehose ──────────────────────────────────────────────────────────────────
+
+output "firehose_stream_name" {
+  description = "Name of the Kinesis Firehose delivery stream"
+  value       = aws_kinesis_firehose_delivery_stream.this.name
+}
+
+output "firehose_stream_arn" {
+  description = "ARN of the Kinesis Firehose delivery stream"
+  value       = aws_kinesis_firehose_delivery_stream.this.arn
+}
+
+output "firehose_delivery_role_arn" {
+  description = "ARN of the Firehose delivery IAM role"
+  value       = aws_iam_role.firehose_delivery.arn
+}
