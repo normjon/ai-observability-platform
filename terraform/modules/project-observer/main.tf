@@ -35,3 +35,32 @@ resource "grafana_dashboard" "project" {
   config_json = data.http.dashboard[each.key].response_body
   overwrite   = true
 }
+
+# ── Component 4: CloudWatch alarms ────────────────────────────────────────────
+# One alarm per alert_definition in project.yaml. treat_missing_data defaults
+# to "notBreaching" — new projects have no history and should not false-alarm.
+# Alarm names are scoped to project_id to avoid collision across projects.
+
+resource "aws_cloudwatch_metric_alarm" "project" {
+  for_each = {
+    for idx, a in var.alert_definitions :
+    "${var.project_id}-${a.metric_name}-${idx}" => a
+  }
+
+  alarm_name          = "ai-observability-${var.project_id}-${each.value.metric_name}-${var.environment}"
+  alarm_description   = each.value.description
+  comparison_operator = each.value.comparison
+  evaluation_periods  = 1
+  metric_name         = each.value.metric_name
+  namespace           = each.value.metric_namespace
+  period              = each.value.period
+  statistic           = each.value.statistic
+  threshold           = each.value.threshold
+  treat_missing_data  = "notBreaching"
+  dimensions          = each.value.dimensions
+
+  tags = merge(var.tags, {
+    Project = var.project_id
+    Owner   = var.owner
+  })
+}
