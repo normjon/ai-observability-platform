@@ -1,0 +1,42 @@
+project_id: ai-platform
+display_name: Enterprise AI Platform
+owner: platform-team
+environment: dev
+
+metric_namespaces:
+  - AIPlatform/Quality
+  - AWS/Lambda
+  - AWS/Bedrock
+  - AWS/DynamoDB
+  - AWS/AOSS
+
+metric_catalogue_url: https://raw.githubusercontent.com/normjon/ai-platform-demo/main/specs/observability-metric-catalogue.md
+
+dashboards:
+  - name: agent-operational-health
+    source_url: https://raw.githubusercontent.com/normjon/ai-platform-demo/main/specs/dashboards/agent-operational-health.json
+  - name: quality-trending
+    source_url: https://raw.githubusercontent.com/normjon/ai-platform-demo/main/specs/dashboards/quality-trending.json
+  - name: cost-token-consumption
+    source_url: https://raw.githubusercontent.com/normjon/ai-platform-demo/main/specs/dashboards/cost-token-consumption.json
+
+alerts:
+  - metric_namespace: AIPlatform/Quality
+    metric_name: BelowThreshold
+    dimensions:
+      AgentId: hr-assistant-dev
+    statistic: Sum
+    period: 3600
+    threshold: 3
+    comparison: GreaterThanThreshold
+    description: More than 3 HR Assistant responses below quality threshold in the last hour
+
+  - metric_namespace: AWS/Lambda
+    metric_name: Errors
+    dimensions:
+      FunctionName: ai-platform-dev-quality-scorer
+    statistic: Sum
+    period: 3600
+    threshold: 1
+    comparison: GreaterThanOrEqualToThreshold
+    description: Quality scorer Lambda encountered one or more errors in the last hour

@@ -1,0 +1,17 @@
+# Copy this file to terraform.tfvars and fill in the values.
+# Never commit terraform.tfvars — it is git-ignored.
+
+aws_region  = "us-east-2"
+account_id  = "<your-aws-account-id>"
+environment = "dev"
+
+# Grafana API key — created via:
+#   aws grafana create-workspace-api-key \
+#     --key-name "terraform-project-registration" \
+#     --key-role "ADMIN" \
+#     --seconds-to-live 86400 \
+#     --workspace-id <amg_workspace_id> \
+#     --region us-east-2
+# Pass via environment variable to avoid storing in tfvars:
+#   export TF_VAR_grafana_auth=<api-key>
+grafana_auth = "<grafana-api-key>"

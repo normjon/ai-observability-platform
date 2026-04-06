@@ -111,7 +111,7 @@ resource "aws_cloudwatch_metric_stream" "project" {
   name          = "ai-observability-${var.project_id}-stream-${var.environment}"
   role_arn      = aws_iam_role.cw_stream_project[0].arn
   firehose_arn  = var.firehose_stream_arn
-  output_format = "opentelemetry1.0"
+  output_format = "json"
 
   dynamic "include_filter" {
     for_each = local.custom_namespaces
