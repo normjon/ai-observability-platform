@@ -124,13 +124,14 @@ def _sanitize(s: str) -> str:
     return ''.join(c if (c.isalnum() or c == '_') else '_' for c in s)
 
 
-def _cw_record_to_timeseries(record: dict) -> list:
+def _cw_record_to_timeseries(record: dict, environment: str = 'unknown') -> list:
     ts_ms = int(record['timestamp'])
     ns = _sanitize(record['namespace'])
     metric = _sanitize(record['metric_name'])
     region = record.get('region', '')
 
     base_labels = [
+        ('environment', environment),
         ('namespace', ns),
         ('metric_name', metric),
         ('region', region),
@@ -189,6 +190,7 @@ def _send_to_amp(protobuf_body: bytes, url: str, region: str) -> None:
 def handler(event, context):
     amp_url = os.environ['AMP_REMOTE_WRITE_URL']
     amp_region = os.environ.get('AMP_REGION', os.environ.get('AWS_REGION', 'us-east-2'))
+    environment = os.environ.get('ENVIRONMENT', 'unknown')
 
     timeseries = []
 
@@ -209,7 +211,7 @@ def handler(event, context):
                 continue
             try:
                 cw = json.loads(line)
-                timeseries.extend(_cw_record_to_timeseries(cw))
+                timeseries.extend(_cw_record_to_timeseries(cw, environment))
             except (json.JSONDecodeError, KeyError, ValueError) as exc:
                 logger.warning("Skipping malformed record: %s", exc)
 

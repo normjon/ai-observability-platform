@@ -255,6 +255,7 @@ resource "aws_lambda_function" "amp_writer" {
     variables = {
       AMP_REMOTE_WRITE_URL = "${aws_prometheus_workspace.this.prometheus_endpoint}api/v1/remote_write"
       AMP_REGION           = var.aws_region
+      ENVIRONMENT          = var.environment
     }
   }
 
