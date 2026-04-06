@@ -103,3 +103,49 @@ terraform apply tfplan
 
 `terraform.tfvars` is git-ignored. Copy `terraform.tfvars.example` and set
 `account_id` to the sandbox account ID.
+
+After any apply that modifies `grafana_data_source.amp`, open
+**Connections → Data sources → Amazon Managed Prometheus — dev → Save & test**
+in the Grafana UI. Grafana's frontend datasource registry caches the prior
+state; dashboard panels show "Datasource amp-dev does not exist" until the
+cache is flushed by Save & test.
+
+---
+
+## Known limitations
+
+**`grafana-amazonprometheus-datasource` plugin unavailable**
+AMG network restrictions prevent external plugin installation. The
+`grafana-amazonprometheus-datasource` plugin (the recommended replacement
+for SigV4 in Grafana 10+) cannot be installed via the Grafana plugin API.
+The workspace uses the core `prometheus` plugin with `sigV4Auth = true`
+and `sigV4AuthType = "default"`. This configuration is deprecated in
+Grafana 10 but remains functional.
+
+Future: when AWS makes `grafana-amazonprometheus-datasource` available
+natively in AMG, migrate by:
+1. Changing `type` in `grafana_data_source.amp` from `"prometheus"` to
+   `"grafana-amazonprometheus-datasource"` and replacing sigV4 fields
+   with `authType = "default"` and `defaultRegion`.
+2. Updating all registered project dashboard JSON files to change their
+   datasource panel `"type"` from `"prometheus"` to
+   `"grafana-amazonprometheus-datasource"`.
+3. Running Save & test after apply.
+
+**`sigV4AuthType = "workspace_iam_role"` is invalid**
+This value is not a valid sigV4AuthType. Use `"default"` which resolves
+to the workspace IAM role via the AWS SDK default credential chain.
+Do not reuse `"workspace_iam_role"` — it causes the datasource to fail
+silently (health check may pass via API while dashboard panels report
+"Datasource does not exist").
+
+**`pluginAdminEnabled = true`**
+Plugin admin was enabled on the workspace to attempt installation of
+`grafana-amazonprometheus-datasource`. The installation was blocked by
+network restrictions but the setting is harmless and left enabled.
+
+**AMG customer-managed KMS**
+`aws_grafana_workspace` in hashicorp/aws 5.x does not expose a
+`kms_key_arn` argument. AMG workspaces use AWS-owned encryption by
+default. Track the upstream provider issue and add `kms_key_arn` once
+the provider exposes it.

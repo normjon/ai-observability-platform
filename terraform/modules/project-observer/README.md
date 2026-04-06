@@ -151,3 +151,16 @@ The API key must be rotated manually or via a separate automation.
 **Dashboard JSON at plan time**: Dashboard `source_url` values must be
 publicly reachable when `terraform plan` runs. Private GitHub repositories
 require a token passed via the `http` provider's `request_headers`.
+
+**Dashboard JSON datasource type**: All panel and target `datasource`
+objects in dashboard JSON must use `"type": "prometheus"`, not
+`"type": "grafana-amazonprometheus-datasource"`. The AMG workspace runs
+Grafana 10.4 with the core `prometheus` plugin only — the dedicated AMP
+plugin is not available. A type mismatch causes panels to report
+"Datasource does not exist" even when the datasource UID is correct.
+This applies to every project that registers dashboards. When generating
+or updating dashboard JSON, always use `"type": "prometheus"` for any
+datasource reference pointing to `uid: "amp-<environment>"`.
+
+Future: if AMG gains native support for `grafana-amazonprometheus-datasource`,
+update this module's documentation and all project dashboard JSON files.

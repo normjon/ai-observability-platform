@@ -839,6 +839,79 @@ or a spec document:
 
 ---
 
+## AMG Datasource Configuration — Known Constraints
+
+Read this before modifying `grafana_data_source.amp` in the platform layer.
+
+### Plugin availability
+
+`grafana-amazonprometheus-datasource` is NOT available in this AMG workspace.
+AMG network restrictions block external plugin installation. The only
+available Prometheus plugin is the core `prometheus` plugin.
+
+Do NOT attempt to use `type = "grafana-amazonprometheus-datasource"` in
+`grafana_data_source` — the health check returns "Plugin not registered"
+and dashboard panels report "Datasource does not exist".
+
+### Correct datasource configuration
+
+```hcl
+resource "grafana_data_source" "amp" {
+  type = "prometheus"                          # NOT grafana-amazonprometheus-datasource
+  uid  = "amp-${var.environment}"
+  url  = aws_prometheus_workspace.this.prometheus_endpoint
+
+  json_data_encoded = jsonencode({
+    sigV4Auth     = true
+    sigV4AuthType = "default"                  # NOT "workspace_iam_role" — invalid value
+    sigV4Region   = var.aws_region
+    httpMethod    = "POST"
+    timeInterval  = "60s"
+  })
+}
+```
+
+`sigV4AuthType = "default"` uses the AMG workspace IAM role via the AWS
+SDK default credential chain. `"workspace_iam_role"` is not a valid value —
+it causes the datasource to fail silently.
+
+### Dashboard JSON datasource type
+
+All dashboard JSON panels must use `"type": "prometheus"` when referencing
+the AMP datasource:
+
+```json
+"datasource": {
+  "type": "prometheus",
+  "uid": "amp-dev"
+}
+```
+
+Using `"type": "grafana-amazonprometheus-datasource"` causes "Datasource
+does not exist" in panels because the plugin is not installed.
+
+### Frontend cache flush after apply
+
+After any Terraform apply that modifies `grafana_data_source.amp`, the
+Grafana frontend datasource registry must be flushed manually:
+
+1. Open **Connections → Data sources → Amazon Managed Prometheus — dev**
+2. Click **Save & test**
+
+Without this step, dashboard panels continue to report "Datasource
+amp-dev does not exist" even after a successful apply.
+
+### Future migration path
+
+When AMG makes `grafana-amazonprometheus-datasource` available natively:
+1. Change `type` to `"grafana-amazonprometheus-datasource"` and replace
+   sigV4 fields with `authType = "default"` and `defaultRegion`.
+2. Update dashboard JSON in all registered project repositories to change
+   `"type": "prometheus"` → `"type": "grafana-amazonprometheus-datasource"`.
+3. Re-apply platform and all project layers, then run Save & test.
+
+---
+
 ## Definition of Done — Dev Environment
 
 **Platform layer:**
