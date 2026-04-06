@@ -1,0 +1,9 @@
+# Terraform — never committed
+**/.terraform/
+**/*.tfstate
+**/*.tfstate.backup
+**/terraform.tfvars
+**/crash.log
+**/override.tf
+**/.terraform.lock.hcl
+**/tfplan

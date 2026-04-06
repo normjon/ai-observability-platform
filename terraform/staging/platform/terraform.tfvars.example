@@ -1,0 +1,3 @@
+aws_region  = "us-east-2"
+environment = "staging"
+account_id  = "<your-account-id>"
