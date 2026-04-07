@@ -74,8 +74,8 @@ Read these before generating AMP or AMG resource definitions:
   https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/grafana_workspace
 - Grafana Terraform provider docs:
   https://registry.terraform.io/providers/grafana/grafana/latest/docs
-- CloudWatch metric streams to AMP:
-  https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/CloudWatch-metric-streams-formats-opentelemetry.html
+- CloudWatch metric streams to AMP (use json format — not opentelemetry1.0):
+  https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/CloudWatch-metric-streams-formats-json.html
 
 ---
 
@@ -142,9 +142,49 @@ The observability platform team never:
 
 The observability platform uses a push model. Application teams
 push metrics to CloudWatch. The observability platform streams
-those metrics from CloudWatch into AMP via Kinesis Firehose.
-Application teams do not need an ARN, endpoint, or target —
-the stream is transparent to them.
+those metrics from CloudWatch into AMP via Kinesis Firehose and
+a Lambda transformation processor. Application teams do not need
+an ARN, endpoint, or target — the stream is transparent to them.
+
+### CRITICAL — Do not use Firehose http_endpoint with AMP
+
+Kinesis Firehose `http_endpoint` destinations do NOT support SigV4
+request signing. The `role_arn` field in `http_endpoint_configuration`
+controls S3 backup permissions only — it is not used to sign HTTP
+requests to the endpoint. AMP requires SigV4-signed requests with
+the `aps` service name. Firehose `http_endpoint` will always receive
+403 from AMP.
+
+The correct architecture is `extended_s3` + Lambda transformation:
+
+```
+CloudWatch metric stream (json format)
+        │
+        ▼  PutRecord
+Kinesis Firehose (extended_s3 destination)
+        │
+        ▼  Lambda transformation processor (synchronous)
+AMP Writer Lambda
+  - base64 decode + gzip decompress records
+  - parse CloudWatch JSON format
+  - encode Prometheus remote write protobuf
+  - snappy compress (cramjam)
+  - SigV4 sign with botocore
+  - POST to AMP remote_write endpoint
+        │
+        ▼
+S3 archive (raw CloudWatch JSON — replay buffer)
+```
+
+### Metric stream output format
+
+The CloudWatch metric stream uses `output_format = "json"` —
+newline-delimited CloudWatch JSON records. Do NOT use
+`opentelemetry1.0`. That format produces binary OTLP protobuf
+which the Lambda transformation processor cannot parse as text.
+The project-observer per-project streams also use `output_format = "json"`.
+
+### End-to-end conceptual flow
 
 ```
 Application team pushes                Observability platform streams
@@ -153,10 +193,13 @@ Explicit put_metric_data()    →        CloudWatch (account-level)
 AWS service auto-metrics      →        CloudWatch (account-level)
 Metric Filter transforms      →        CloudWatch (account-level)
                                               │
-                                              ▼  CloudWatch metric stream
-                                       Kinesis Firehose
+                                              ▼  metric stream (json)
+                                       Kinesis Firehose (extended_s3)
                                               │
-                                              ▼  remote write
+                                              ▼  Lambda transformation
+                                       AMP Writer Lambda (SigV4 signed)
+                                              │
+                                              ▼  remote_write
                                        AMP workspace
                                               │
                                               ▼  PromQL query
@@ -485,12 +528,15 @@ terraform/
       variables.tf
       outputs.tf
       terraform.tfvars.example
-    platform/                 # Layer 2 — AMP, AMG, Firehose, stream
+    platform/                 # Layer 2 — AMP, AMG, Firehose, stream, Lambda
       backend.tf              # State: dev/platform/terraform.tfstate
       main.tf
       variables.tf
       outputs.tf
       terraform.tfvars.example
+      lambda/               # AMP writer Lambda source
+        handler.py          # Prometheus remote write encoder
+        requirements.txt    # cramjam==2.9.1 only
     projects/
       <project-id>/           # Layer 3 — per-project observability
         project.yaml          # Written by project team's agent
@@ -520,16 +566,16 @@ terraform/
 **Foundation** — long-lived, destroyed only on decommission:
 - VPC (10.1.0.0/16) — isolated from all other platform VPCs
 - KMS key for AMP and AMG encryption
-- IAM roles for metric stream delivery, Firehose delivery,
-  and AMG data source access
 - S3 bucket for Kinesis Firehose buffer
 
 **Platform** — freely destroyable and reapplyable:
 - AMP workspace
 - AMG workspace and Grafana organisation
-- Kinesis Firehose delivery stream
-- CloudWatch metric stream (account-level, namespace-filtered)
+- AMP writer Lambda (extended_s3 + Lambda Firehose architecture)
+- Kinesis Firehose delivery stream (extended_s3 destination)
+- CloudWatch metric stream (account-level, namespace-filtered, json format)
 - AMG data source configuration (AMP + CloudWatch for alarms only)
+- IAM roles: cw-stream, firehose-delivery, lambda-amp-writer, amg-datasource
 
 **Projects/<project-id>** — owned and applied per project:
 - Instantiates project-observer module with project.yaml values
@@ -679,11 +725,28 @@ Permissions: firehose:PutRecord, firehose:PutRecordBatch
 Layer: platform
 Trust: firehose.amazonaws.com
 Permissions:
-- aps:RemoteWrite on exact AMP workspace ARN (same-layer resource)
+- lambda:InvokeFunction on Lambda ARN:* (the AMP writer Lambda —
+  Firehose calls it as a synchronous transformation processor)
 - s3:PutObject on exact Firehose buffer bucket ARN (foundation
   remote state output)
 - kms:GenerateDataKey, kms:Decrypt on exact KMS key ARN
   (foundation remote state output)
+
+Note: This role does NOT hold aps:RemoteWrite. AMP writes are
+performed by the Lambda execution role, not the Firehose role.
+Firehose http_endpoint cannot sign SigV4 — see metric flow section.
+
+**ai-observability-lambda-amp-writer-<env>**
+Layer: platform
+Trust: lambda.amazonaws.com
+Permissions:
+- aps:RemoteWrite on exact AMP workspace ARN (same-layer resource)
+- kms:GenerateDataKey, kms:Decrypt on exact KMS key ARN
+  (foundation remote state output)
+  REQUIRED: AMP enforces KMS authorisation for all writes to
+  CMK-encrypted workspaces. aps:RemoteWrite alone is insufficient.
+- logs:CreateLogGroup, logs:CreateLogStream, logs:PutLogEvents
+  on Lambda log group ARN
 
 **ai-observability-amg-datasource-<env>**
 Layer: platform
@@ -701,6 +764,46 @@ are never queried by the observability platform.
 Note: CloudWatch metric APIs do not support resource-level ARN
 scoping. The * on CloudWatch actions is a documented AWS service
 limitation, not a policy gap.
+
+---
+
+## Lambda Architecture — ADR-004 Exception
+
+### ADR-004 Exception — Firehose Transformation Lambda
+
+The AMP writer Lambda (`ai-observability-amp-writer-<env>`) attached
+to the Kinesis Firehose delivery stream as a transformation processor
+MUST use `x86_64` architecture, not `arm64`.
+
+Firehose transformation processors run on x86 infrastructure. Deploying
+with `arm64` causes the Lambda to fail silently during transformation —
+no error is surfaced to the caller and records may be dropped or
+archived without being written to AMP.
+
+This is the only Lambda in this repository exempt from the arm64/Graviton
+requirement (ADR-004). All other Lambdas follow ADR-004.
+
+Build the Firehose Lambda dependencies with the manylinux x86 target:
+
+```bash
+pip install \
+  --platform manylinux2014_x86_64 \
+  --target=lambda/package/ \
+  --only-binary=:all: \
+  --python-version 3.12 \
+  --implementation cp \
+  -r lambda/requirements.txt
+```
+
+### Lambda dependency
+
+`cramjam==2.9.1` is the only external dependency. It provides snappy
+compression for Prometheus remote write. All other dependencies
+(boto3, botocore, urllib) are included in the Lambda runtime.
+
+Do not add protobuf libraries. The handler uses a hand-coded minimal
+protobuf encoder to avoid binary dependency issues in the Firehose
+execution environment.
 
 ---
 
