@@ -46,8 +46,8 @@ The correct architecture (per AWS documentation) is:
   snappy compression, SigV4 signing, and HTTP POST to AMP
 - Firehose archives the raw CloudWatch JSON to S3 as a replay buffer
 
-Reference: https://github.com/aws-observability/observability-best-practices/
-tree/main/sandbox/CWMetricStreamExporter
+Reference implementation:
+https://github.com/aws-observability/observability-best-practices/tree/main/sandbox/CWMetricStreamExporter
 
 ---
 
@@ -149,3 +149,54 @@ network restrictions but the setting is harmless and left enabled.
 `kms_key_arn` argument. AMG workspaces use AWS-owned encryption by
 default. Track the upstream provider issue and add `kms_key_arn` once
 the provider exposes it.
+
+---
+
+## Troubleshooting
+
+### Dashboard panels show "Datasource does not exist"
+
+Run **Save & test** on the AMP data source in the Grafana UI
+(**Connections → Data sources → Amazon Managed Prometheus — dev →
+Save & test**). Grafana caches the prior datasource state in its
+frontend registry. This must be done after every `terraform apply`
+that modifies `grafana_data_source.amp`.
+
+If Save & test itself fails with a 403, check:
+- The `amg_datasource` IAM role has `aps:QueryMetrics` on the AMP workspace
+- `sigV4AuthType` is `"default"` not `"workspace_iam_role"` (invalid)
+- The workspace region matches the AMP workspace region
+
+### Metrics not appearing in dashboards after 10+ minutes
+
+Check in this order:
+
+1. **CloudWatch** — confirm the metric exists in the source namespace
+   using the CloudWatch console Metrics browser.
+2. **Metric stream** — confirm RUNNING state in the console; check the
+   stream error metrics in CloudWatch (`MetricStreamErrors` alarm).
+3. **Firehose** — check Lambda transformation errors in the delivery
+   stream **Monitoring** tab in the AWS console. Look for
+   `DeliveryToS3.DataFreshness` and `SucceedProcessing.Records`.
+4. **Lambda logs** — check CloudWatch Logs at
+   `/aws/lambda/ai-observability-amp-writer-dev` for AMP write errors.
+5. **AMP direct query** — use AMG **Explore** → select the Prometheus
+   data source → query `{__name__=~".+"}` to confirm whether metrics
+   exist in AMP independent of dashboard rendering.
+
+### Lambda transformation errors
+
+Common causes:
+
+- **CloudWatch JSON format changed** — check `handler.py` parser against
+  the current metric stream record format.
+- **cramjam version mismatch** — verify `requirements.txt` specifies
+  `cramjam==2.9.1` and the Lambda package was built with
+  `--platform manylinux2014_x86_64`.
+- **AMP remote write endpoint changed** — check the `AMP_REMOTE_WRITE_URL`
+  environment variable against the current workspace endpoint in
+  Terraform outputs.
+- **KMS permissions** — the Lambda execution role requires both
+  `aps:RemoteWrite` AND `kms:GenerateDataKey`/`kms:Decrypt`. AMP
+  enforces KMS authorisation for CMK-encrypted workspaces.
+  `aps:RemoteWrite` alone is insufficient.
