@@ -63,6 +63,9 @@ Before initiating registration the following must be true:
 | Observability platform platform layer applied | Platform team |
 | AMP workspace ACTIVE | Platform team |
 | AMG workspace ACTIVE | Platform team |
+| AMP writer Lambda ACTIVE and not in error state | Platform team |
+| Kinesis Firehose delivery stream ACTIVE | Platform team |
+| CloudWatch metric stream RUNNING | Platform team |
 | Project is pushing custom metrics to CloudWatch | Project team |
 | Project has CloudWatch Metric Filters for log-derived metrics | Project team |
 | Project metrics are using the agreed namespace convention | Project team |
@@ -395,11 +398,54 @@ fetches them via the http data source.
 CI/CD pipeline applies `terraform/<env>/projects/<project-id>`.
 
 Verify after apply:
-- Grafana folder appears in AMG named <project-id>
-- All dashboards render without errors
-- Metrics appear in dashboard panels within one metric
-  stream delivery cycle (typically 1-3 minutes)
+
+**Step 1 — Confirm per-project metric stream is RUNNING**
+
+```bash
+aws cloudwatch describe-metric-streams \
+  --region us-east-2 \
+  --query "MetricStreams[?contains(Name,'<project-id>')]"
+```
+
+State must be `RUNNING`. If `STOPPED` or missing, the custom
+namespace metrics will not flow to AMP.
+
+**Step 2 — Wait for first metric delivery cycle**
+
+Wait 3–5 minutes after the metric stream enters RUNNING state
+before expecting metrics to appear in AMP. The Firehose buffering
+interval introduces up to 60 seconds of additional latency.
+
+**Step 3 — Confirm metrics arrived in AMP**
+
+Use AMG Explore → select the AMP Prometheus data source →
+query `{__name__=~".+"}` or `count by(__name__)({__name__=~".+"})` 
+to list all metric names. Project metrics should appear within
+5 minutes of the first emission from the application.
+
+**Step 4 — Run Save & test on the AMP data source**
+
+If dashboard panels show "Datasource does not exist" after apply,
+open **Connections → Data sources → Amazon Managed Prometheus — dev
+→ Save & test** in the Grafana UI. This flushes the frontend
+datasource cache. See CLAUDE.md — AMG Datasource Configuration.
+
+**Step 5 — Verify dashboard panels and alerts**
+
+- Grafana folder appears in AMG named `<project-id>`
+- All dashboards render without panel errors
 - All alerts created and in OK state
+
+**If metrics do not appear in AMP after 10 minutes,** check in order:
+
+1. CloudWatch — confirm the metric exists in the source namespace
+2. Metric stream — confirm RUNNING state, check for stream errors
+3. Firehose — check Lambda transformation errors in the delivery
+   stream monitoring tab in the AWS console
+4. Lambda — check CloudWatch Logs for the AMP writer Lambda
+   (`/aws/lambda/ai-observability-amp-writer-<env>`)
+5. AMP — query directly via AMG Explore to bypass Grafana
+   panel rendering
 
 ---
 
