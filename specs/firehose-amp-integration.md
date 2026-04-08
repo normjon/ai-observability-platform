@@ -305,7 +305,68 @@ Skipped records are still archived to S3.
 
 ---
 
-## 8. Known Limitations
+## 8. PromQL Query Patterns for CloudWatch Gauge Metrics
+
+This section explains a critical distinction that affects every dashboard
+panel querying CloudWatch-sourced metrics in AMP.
+
+### 8.1 CloudWatch metrics are gauges in AMP, not counters
+
+When the AMP writer Lambda writes a CloudWatch metric stream record to AMP
+via remote write, each CloudWatch aggregation period (typically 1 minute)
+produces a **single independent gauge sample**. The value represents what
+CloudWatch measured in that one period — it does not accumulate across periods.
+
+This is fundamentally different from native Prometheus counters, which are
+monotonically increasing and designed for `rate()` and `increase()`.
+
+| Prometheus function | Works on counters | Works on CloudWatch gauges |
+|---|---|---|
+| `rate(metric[5m])` | Yes | **No** — always returns 0 |
+| `increase(metric[window])` | Yes | **No** — always returns 0 |
+| `sum_over_time(metric[window])` | Rarely useful | **Yes** — correct for totals |
+| `metric_sum / metric_count` | N/A | **Yes** — correct for averages |
+| `metric_max` | N/A | **Yes** — correct for peaks |
+
+### 8.2 Correct patterns
+
+```promql
+# Summing counts over a time window (e.g. invocations in 24h)
+sum(sum_over_time(cloudwatch_AWS_Bedrock_Invocations_sum{environment="$environment"}[24h]))
+
+# Per-record average (e.g. quality scores, latency averages)
+cloudwatch_AIPlatform_Quality_QualityScore_sum{environment="$environment", Dimension="overall"}
+  / cloudwatch_AIPlatform_Quality_QualityScore_count{environment="$environment", Dimension="overall"}
+
+# Peak value (e.g. max document count, max latency)
+cloudwatch_AWS_AOSS_SearchableDocuments_max{environment="$environment"}
+
+# Rate of events per minute (approximation — not true rate())
+sum_over_time(cloudwatch_AWS_Lambda_Invocations_sum{environment="$environment"}[5m]) / 5
+```
+
+### 8.3 Why `increase()` returns 0
+
+`increase()` computes `(last_value - first_value)` over the window, adjusted
+for counter resets. For a gauge that emits `5` in period 1 and `5` in period 2,
+`increase()` returns `5 - 5 = 0`. The metric has not increased — it emits
+the same value each period. This is correct gauge behaviour, not a bug.
+
+### 8.4 Prometheus staleness window
+
+AMP applies a 5-minute staleness window to instant queries. If the most recent
+sample for a metric is older than 5 minutes, the query returns no data. This
+affects batch-driven metrics (e.g. the quality scorer runs hourly):
+
+- **Stat panels** (`lastNotNull`) show "No data" when the last scorer run was
+  more than 5 minutes ago.
+- **Timeseries panels** display the full historical record regardless of staleness.
+
+This is expected behaviour. Document it in affected panel descriptions.
+
+---
+
+## 9. Known Limitations
 
 ### 8.1 `opentelemetry1.0` format incompatible with Lambda parser
 

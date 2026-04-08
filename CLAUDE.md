@@ -817,17 +817,28 @@ Template variables — every dashboard must include:
   $environment   — dev / staging / production
   $time_range    — Grafana time range picker
 
-PromQL conventions:
+PromQL conventions — CRITICAL — read before writing any query:
 - All metric names exactly as in the project's metric catalogue
 - Filter by environment label on every query
-- Use rate() for counter metrics
-- P95 latency: histogram_quantile(0.95, ...)
+- **CloudWatch metrics are gauges in AMP, not counters** — do NOT use
+  `rate()` or `increase()` — they always return 0 on gauge metrics
+- For totals over a window: `sum(sum_over_time(metric_sum[window]))`
+- For per-record averages (scores, latency): `metric_sum / metric_count`
+- For peak values: `metric_max`
+- P95 latency does not exist for CloudWatch metrics — use `_max` for peak
+  or `_sum / _count` for average
+- `barchart` panel type cannot be used with Prometheus time series —
+  use `timeseries` with `drawStyle: bars`
+- AOSS successful request metric is `2xx_sum`, NOT `SuccessfulRequestCount_sum`
+- AOSS document count: use `SearchableDocuments_max`, not `SearchableDocuments_sum`
 
 Panel standards:
 - Time series: include legend with last/min/max values
 - Stat panels: include threshold colour coding
-- Bar charts: include value labels
+- Bar-style time series: use `timeseries` type with `drawStyle: bars`
 - All panels include description tooltip
+
+See specs/dashboard-standards.md Section 6.3 and 6.6 for full details and examples.
 
 Naming:
 - Dashboard title: "<Display Name> — <Category>"

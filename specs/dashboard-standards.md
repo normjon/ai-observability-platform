@@ -1,6 +1,6 @@
 # Dashboard Standards
 
-**Version:** 1.0
+**Version:** 1.1
 **Status:** Approved
 **Repository:** ai-observability-platform
 **Location:** specs/dashboard-standards.md
@@ -209,14 +209,20 @@ QualityScore{environment="dev"}
 
 | Panel type | Grafana type string | Use for |
 |---|---|---|
-| Time series | `timeseries` | Metrics that change over time — latency, scores, rates |
-| Bar chart | `barchart` | Aggregated counts over discrete periods — tokens per day |
+| Time series | `timeseries` | Metrics that change over time — latency, scores, rates, bar-style counts |
 | Stat | `stat` | Single current values — error count, P95 latency now |
 | Histogram | `histogram` | Score distributions, latency distributions |
 | Table | `table` | Recent records, structured data from log queries |
 | Gauge | `gauge` | Percentages and ratios with min/max bounds |
 
 Never use the deprecated `graph` type — use `timeseries` instead.
+
+**Do NOT use the `barchart` type for Prometheus time series data.**
+The Grafana `barchart` panel type requires a categorical x field. It cannot
+use a Prometheus time vector as the x axis and will produce
+`Configured x field not found` for any Prometheus-sourced query.
+For bar-style displays of time series data, use `timeseries` with
+`"drawStyle": "bars"` in `fieldConfig.defaults.custom` (see Section 5.5).
 
 ### 5.2 Required panel fields
 
@@ -313,27 +319,43 @@ Stat panels must include threshold colour coding. Green/amber/red
 thresholds calibrated to the metric's acceptable range. Use
 `"colorMode": "background"` so the threshold colour is obvious.
 
-### 5.5 Bar chart panels
+### 5.5 Bar-style time series panels
+
+For bar-style displays of time series data (e.g. counts per hour, tokens per day),
+use `timeseries` with `drawStyle: bars` — **not** `barchart`.
 
 ```json
 {
-  "type": "barchart",
+  "type": "timeseries",
   "options": {
-    "xField": "time",
-    "stacking": "none",
     "legend": {
       "displayMode": "list",
       "placement": "bottom"
+    },
+    "tooltip": { "mode": "multi" }
+  },
+  "fieldConfig": {
+    "defaults": {
+      "custom": {
+        "lineWidth": 2,
+        "fillOpacity": 10,
+        "drawStyle": "bars"
+      }
     }
   }
 }
 ```
 
-Bar charts used for daily aggregations must use a step of 86400
-seconds (one day) in the PromQL query:
+**Why `barchart` cannot be used:** The Grafana `barchart` type requires a
+discrete categorical x field. When given a Prometheus time series it cannot
+find the time field and throws `Configured x field not found`. This error
+only appears at runtime — it is not caught by JSON validation.
+
+For per-day totals of CloudWatch gauge metrics use `sum_over_time` with a `[1d]`
+window (see Section 6.3 for why `increase()` must not be used):
 
 ```
-sum(increase(InputTokenCount{environment="$environment"}[1d]))
+sum(sum_over_time(cloudwatch_AWS_Bedrock_InputTokenCount_sum{environment="$environment"}[1d]))
 ```
 
 ### 5.6 Grid layout
@@ -416,47 +438,81 @@ rate(cloudwatch_AWS_Lambda_Errors_sum{environment="$environment"}[5m])
 rate(cloudwatch_AWS_Lambda_Errors_sum[5m])
 ```
 
-### 6.3 Rate vs instant
-Use `rate()` for counter metrics. Use instant value for gauge
-metrics. Never use raw counter values in time series panels.
+### 6.3 CloudWatch gauge metric query patterns
+
+**All CloudWatch metrics arriving via Firehose→AMP are gauges, not counters.**
+
+CloudWatch publishes one value per metric per period (typically 1 minute). When
+the Firehose Lambda writes these to AMP via remote write, each period becomes an
+independent gauge sample. The values do NOT accumulate across periods the way
+Prometheus counters do.
+
+This means:
+- `rate()` always returns 0 or misleading values on CloudWatch-sourced metrics.
+- `increase()` always returns 0 on CloudWatch-sourced metrics.
+- These functions are designed for monotonically increasing counters. CloudWatch
+  gauge values reset each period — they are not counters.
+
+**Correct query patterns:**
 
 ```
-# Counters — use rate()
+# WRONG — increase() and rate() return 0 on CloudWatch gauges
+increase(cloudwatch_AWS_Bedrock_InputTokenCount_sum{environment="$environment"}[1d])
 rate(cloudwatch_AWS_Lambda_Invocations_sum{environment="$environment"}[5m])
 
-# Gauges — use instant value
+# CORRECT — sum_over_time() sums all gauge values within the window
+sum(sum_over_time(cloudwatch_AWS_Bedrock_InputTokenCount_sum{environment="$environment"}[1d]))
+sum(sum_over_time(cloudwatch_AWS_Lambda_Invocations_sum{environment="$environment"}[5m]))
+
+# WRONG — _sum alone shows the batch total, not per-record average
 cloudwatch_AIPlatform_Quality_QualityScore_sum{environment="$environment", Dimension="overall"}
+
+# CORRECT — divide _sum by _count to get per-record average (keeps values in 0.0–1.0 range)
+cloudwatch_AIPlatform_Quality_QualityScore_sum{environment="$environment", Dimension="overall"}
+  / cloudwatch_AIPlatform_Quality_QualityScore_count{environment="$environment", Dimension="overall"}
+
+# CORRECT — _max for metrics where you want the observed maximum (e.g. document count)
+cloudwatch_AWS_AOSS_SearchableDocuments_max{environment="$environment"}
 ```
+
+**Rule summary:**
+
+| Metric intent | Correct PromQL pattern |
+|---|---|
+| Sum counts over a time window | `sum(sum_over_time(metric_sum[window]))` |
+| Per-record average (0–1 scores, latency avg) | `metric_sum / metric_count` |
+| Peak value (document count, max latency) | `metric_max` or `max_over_time(metric_max[window])` |
+| Rate of events per minute | `sum_over_time(metric_sum[5m]) / 5` (not `rate()`) |
+
+**Prometheus staleness for batch metrics:** Instant queries (`lastNotNull` in stat
+panels) return NO DATA when the most recent sample is older than 5 minutes. This
+affects batch-triggered metrics such as the quality scorer (runs hourly). Range
+queries (timeseries panels) display historical data correctly regardless of staleness.
+If a stat panel shows "No data" but the timeseries panel shows data, the metric is
+stale — this is expected behaviour for batch-driven metrics.
 
 ### 6.4 Percentile latency
 CloudWatch metric streams do not produce histogram buckets or percentiles.
-Use `max` for peak latency or `avg_over_time` for smoothed average. Never
+Use `max` for peak latency or `_sum / _count` for average. Never
 reference `_p50`, `_p95`, or `_bucket` metric names — these do not exist
 in AMP for CloudWatch-sourced metrics.
 
 ```
-# Correct — use max as peak proxy
+# Correct — use _max as peak proxy
 cloudwatch_AWS_Bedrock_InvocationLatency_max{environment="$environment"}
 
-# Correct — smoothed average
-avg_over_time(
-  cloudwatch_AWS_Lambda_Duration_sum{environment="$environment"}[5m]
-)
+# Correct — average latency using sum/count ratio
+cloudwatch_AIPlatform_Quality_ScorerLatency_sum{environment="$environment"}
+  / cloudwatch_AIPlatform_Quality_ScorerLatency_count{environment="$environment"}
 
 # Wrong — histogram_quantile requires _bucket metrics that don't exist
 histogram_quantile(0.95,
   rate(InvocationLatency_bucket{environment="$environment"}[5m])
 )
 
-```
-# If histogram available
-histogram_quantile(0.95,
-  rate(InvocationLatency_bucket{environment="$environment"}[5m])
-)
-
-# If only average available
+# Wrong — avg_over_time on _sum gives nonsensical results (sum of sums)
 avg_over_time(
-  InvocationLatency{environment="$environment"}[5m]
+  cloudwatch_AWS_Lambda_Duration_sum{environment="$environment"}[5m]
 )
 ```
 
@@ -472,6 +528,30 @@ Use `{{label_name}}` in the legend field to show dimension values:
 
 Never use `"legendFormat": ""` — this produces unhelpful
 auto-generated legend labels.
+
+### 6.6 AOSS metric names
+
+AWS OpenSearch Serverless (AOSS) publishes metrics with non-obvious names.
+The following table maps human intent to the actual CloudWatch metric name
+as it appears in AMP:
+
+| Intent | AMP metric name | Note |
+|---|---|---|
+| Successful API calls | `cloudwatch_AWS_AOSS_2xx_sum` | AOSS calls this `2xx`, NOT `SuccessfulRequestCount` |
+| Client errors | `cloudwatch_AWS_AOSS_4xx_sum` | |
+| Server errors | `cloudwatch_AWS_AOSS_5xx_sum` | |
+| Document count | `cloudwatch_AWS_AOSS_SearchableDocuments_max` | Use `_max`, not `_sum` — `_sum` accumulates per-period values and grows without bound |
+
+**`SuccessfulRequestCount` does not exist in AOSS.** This name appears in
+some AWS documentation but is not emitted by the AOSS CloudWatch metric stream.
+Any panel using `cloudwatch_AWS_AOSS_SuccessfulRequestCount_sum` will show
+"No data" — use `cloudwatch_AWS_AOSS_2xx_sum` instead.
+
+Always filter by `CollectionName` to scope results to a specific collection:
+
+```
+sum_over_time(cloudwatch_AWS_AOSS_2xx_sum{environment="$environment", CollectionName="ai-platform-kb-dev"}[5m])
+```
 
 ---
 
@@ -513,7 +593,7 @@ Row 3 (time series, y=12):
   [Per-dimension scores over time]
   w=24, h=8
 
-Row 4 (bar chart + histogram, y=20):
+Row 4 (time series bar-style + histogram, y=20):
   [Below-threshold count per hour] [Score distribution]
   w=12, h=8 each
 ```
@@ -526,7 +606,7 @@ Row 1 (stats, y=0):
   [Estimated cost today] [KB retrievals today]
   w=6, h=4 each
 
-Row 2 (bar chart, y=4):
+Row 2 (time series bar-style, y=4):
   [Input + output tokens per agent per day]
   w=24, h=8
 
@@ -617,10 +697,15 @@ Before committing dashboard JSON, verify all of the following:
 - [ ] Every panel has a title in sentence case
 - [ ] Every panel has a description (1-3 sentences)
 - [ ] No deprecated `graph` panel type used
+- [ ] No `barchart` type used for Prometheus data — use `timeseries` with `drawStyle: bars`
 - [ ] Time series panels have legend with last/min/max
 - [ ] Stat panels have threshold colour coding
 - [ ] All metric names match the project's metric catalogue exactly
 - [ ] No hardcoded environment strings in queries
+- [ ] No `increase()` or `rate()` used on CloudWatch-sourced metrics — use `sum_over_time()`
+- [ ] Average score/latency uses `_sum / _count` ratio, not raw `_sum`
+- [ ] AOSS successful request metric is `2xx_sum`, not `SuccessfulRequestCount_sum`
+- [ ] AOSS document count uses `SearchableDocuments_max`, not `SearchableDocuments_sum`
 
 ### Layout
 - [ ] Row 1 contains stat panels for at-a-glance current values
@@ -641,3 +726,10 @@ Changes to these standards require:
 Existing dashboards that predate a standards change are
 grandfathered until their next update. New dashboards and
 updated dashboards must always meet the current standard.
+
+### Version history
+
+| Version | Change |
+|---|---|
+| 1.0 | Initial release |
+| 1.1 | Fixed `barchart` → `timeseries` with `drawStyle: bars` (Section 5.5); rewrote Section 6.3 with correct CloudWatch gauge query patterns; added Section 6.6 AOSS metric names; updated validation checklist |
