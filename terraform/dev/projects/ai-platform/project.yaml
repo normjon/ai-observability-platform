@@ -5,6 +5,7 @@ environment: dev
 
 metric_namespaces:
   - AIPlatform/Quality
+  - AIPlatform/AgentCore
   - AWS/Lambda
   - AWS/Bedrock
   - AWS/DynamoDB
