@@ -44,6 +44,7 @@ variable "metric_namespaces" {
   type        = list(string)
   default = [
     "AIPlatform/Quality",
+    "AIPlatform/AgentCore",
     "AWS/Lambda",
     "AWS/Bedrock",
     "AWS/DynamoDB",
